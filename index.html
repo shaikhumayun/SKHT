@@ -7,7 +7,6 @@
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;0,900;1,400;1,700&family=JetBrains+Mono:wght@300;400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 
 <style>
-/* ─── STYLES FROM YOUR ORIGINAL DESIGN ─── */
 :root {
   --bg:#0a0b0d; --surface:#111318; --surface2:#181c22; --surface3:#1e2330;
   --border:#2a2f3d; --border2:#353c50;
@@ -16,31 +15,29 @@
   --radius:12px;
 }
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; overflow-x: hidden; }
+body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-serif; }
 
-/* Splash/Login Overlay */
-#auth-overlay {
-  position: fixed; inset: 0; z-index: 9999; background: var(--bg);
-  display: flex; align-items: center; justify-content: center;
-}
-.auth-card {
-  background: var(--surface); border: 1px solid var(--border2);
-  padding: 40px; border-radius: 24px; text-align: center; width: min(400px, 90vw);
-}
+#auth-overlay { position: fixed; inset: 0; z-index: 9999; background: var(--bg); display: flex; align-items: center; justify-content: center; }
+.auth-card { background: var(--surface); border: 1px solid var(--border2); padding: 40px; border-radius: 24px; text-align: center; width: min(400px, 90vw); }
 
-/* Dashboard Layout */
 #main-dashboard { display: none; padding: 20px; max-width: 1200px; margin: 0 auto; }
 .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 40px; border-bottom: 1px solid var(--border); padding-bottom: 20px; }
-.repo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px; }
-.folder-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; }
-.folder-title { color: var(--gold); font-family: 'Playfair Display'; margin-bottom: 15px; border-bottom: 1px solid var(--border2); padding-bottom: 10px; text-transform: capitalize; }
+.repo-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+.folder-section { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; display: flex; flex-direction: column; }
+.folder-title { color: var(--gold); font-family: 'Playfair Display'; margin-bottom: 15px; border-bottom: 1px solid var(--border2); padding-bottom: 10px; font-size: 20px; }
 
 .file-item { 
   display: flex; justify-content: space-between; align-items: center; 
-  background: var(--surface2); padding: 10px; margin-bottom: 8px; border-radius: 6px; font-size: 14px;
+  background: var(--surface2); padding: 12px; margin-bottom: 8px; border-radius: 8px; font-size: 13px;
+  border: 1px solid transparent; transition: 0.2s;
 }
-.btn { background: var(--gold); color: black; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; }
-.btn-outline { background: transparent; border: 1px solid var(--border2); color: var(--text2); padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+.file-item:hover { border-color: var(--gold-dim); background: var(--surface3); }
+.file-info { display: flex; flex-direction: column; gap: 2px; }
+.sub-path { font-size: 10px; color: var(--gold); opacity: 0.7; font-family: 'JetBrains Mono'; }
+
+.btn { background: var(--gold); color: black; border: none; padding: 8px 16px; border-radius: 6px; cursor: pointer; font-weight: 600; text-decoration: none; display: inline-block; }
+.btn-outline { background: transparent; border: 1px solid var(--border2); color: var(--text2); padding: 8px 14px; border-radius: 6px; cursor: pointer; }
+input { width: 100%; padding: 12px; background: var(--surface2); border: 1px solid var(--border2); color: white; border-radius: 8px; margin-bottom: 15px; outline: none; }
 </style>
 </head>
 <body>
@@ -48,115 +45,120 @@ body { background: var(--bg); color: var(--text); font-family: 'Outfit', sans-se
 <div id="auth-overlay">
   <div class="auth-card">
     <h1 style="font-family:'Playfair Display'; color:var(--gold2); margin-bottom:10px;">SKHT COURT</h1>
-    <p style="color:var(--text3); font-size:12px; margin-bottom:20px;">RESTRICTED ACCESS PORTAL</p>
-    <input type="password" id="access-key" placeholder="Enter Key" style="width:100%; padding:12px; background:var(--surface2); border:1px solid var(--border2); color:white; border-radius:8px; margin-bottom:15px; text-align:center;">
+    <input type="password" id="access-key" placeholder="Enter Access Key">
     <button class="btn" onclick="checkAuth()" style="width:100%;">ACCESS PORTAL</button>
-    <p id="auth-msg" style="color: #e74c3c; font-size: 12px; margin-top: 10px;"></p>
   </div>
 </div>
 
 <div id="main-dashboard">
   <div class="header">
     <div>
-      <h2 style="font-family:'Playfair Display'; font-size:28px;">Legal Repository</h2>
-      <p id="sync-status" style="color:var(--text3); font-size:12px;">Waiting for Sync...</p>
+      <h2 style="font-family:'Playfair Display'; font-size:32px;">Legal Library</h2>
+      <p id="sync-status" style="color:var(--text3); font-size:12px; margin-top:5px;">System Ready</p>
     </div>
     <div style="display:flex; gap:10px;">
         <button class="btn-outline" onclick="openSettings()">⚙️ Settings</button>
-        <button class="btn" onclick="syncGitHub()">🔄 Sync Repo</button>
+        <button class="btn" onclick="syncGitHub()">🔄 Recursive Sync</button>
     </div>
   </div>
 
-  <div class="repo-grid" id="folder-grid">
-    </div>
+  <div class="repo-grid" id="folder-grid"></div>
 </div>
 
 <script>
-/* ─── CONFIGURATION ─── */
 const LEGAL_FOLDERS = ['bareacts', 'judgments', 'books', 'citations', 'others'];
 let _ghRepo = localStorage.getItem('lex-gh-repo') || "";
 let _ghToken = localStorage.getItem('lex-gh-token') || "";
 
-/* ─── BOOT LOGIC ─── */
 function checkAuth() {
-    const key = document.getElementById('access-key').value;
-    if(key === "1234") { // Replace with your key
+    if(document.getElementById('access-key').value === "1234") {
         document.getElementById('auth-overlay').style.display = 'none';
         document.getElementById('main-dashboard').style.display = 'block';
         if(_ghRepo && _ghToken) syncGitHub();
-    } else {
-        document.getElementById('auth-msg').innerText = "Access Denied";
     }
 }
 
 async function syncGitHub() {
-    if(!_ghRepo || !_ghToken) {
-        alert("Please configure GitHub Repo and Token in Settings.");
-        return;
-    }
-
+    if(!_ghRepo || !_ghToken) return alert("Configure Settings First");
+    
     const status = document.getElementById('sync-status');
     const grid = document.getElementById('folder-grid');
-    status.innerText = "Syncing with GitHub...";
-    grid.innerHTML = ""; // Clear current view
+    status.innerText = "Scanning all sub-folders...";
+    grid.innerHTML = ""; 
 
     try {
-        for (const folder of LEGAL_FOLDERS) {
-            const url = `https://api.github.com/repos/${_ghRepo}/contents/${folder}`;
-            const res = await fetch(url, {
-                headers: { 'Authorization': `token ${_ghToken}` }
-            });
-
-            if(res.ok) {
-                const files = await res.json();
-                renderFolder(folder, files);
-            } else {
-                renderFolder(folder, [], "Folder not found in repo");
-            }
+        for (const rootFolder of LEGAL_FOLDERS) {
+            // We fetch the recursive tree for each specific root category
+            const files = await fetchRecursiveFiles(rootFolder);
+            renderFolder(rootFolder, files);
         }
-        status.innerText = "Sync Complete: " + new Date().toLocaleTimeString();
+        status.innerText = "Recursive Sync Complete: " + new Date().toLocaleTimeString();
     } catch (err) {
-        status.innerText = "Sync Failed. Check console.";
+        status.innerText = "Error scanning repository.";
         console.error(err);
     }
 }
 
-function renderFolder(name, files, error = null) {
-    const grid = document.getElementById('folder-grid');
-    let fileHtml = "";
+async function fetchRecursiveFiles(path) {
+    let collectedFiles = [];
+    
+    // Step 1: Get the current level
+    const url = `https://api.github.com/repos/${_ghRepo}/contents/${path}`;
+    const res = await fetch(url, { headers: { 'Authorization': `token ${_ghToken}` } });
+    
+    if(!res.ok) return [];
+    const items = await res.json();
 
-    if(error) {
-        fileHtml = `<p style="color:var(--text3); font-size:12px;">${error}</p>`;
-    } else if (files.length === 0) {
-        fileHtml = `<p style="color:var(--text3); font-size:12px;">No files found</p>`;
-    } else {
-        fileHtml = files.filter(f => f.type === 'file').map(f => `
+    for (const item of items) {
+        if (item.type === 'file') {
+            // Add file with its path (stripping the root folder name for cleaner UI)
+            collectedFiles.push({
+                name: item.name,
+                download_url: item.download_url,
+                displayPath: item.path.split('/').slice(1, -1).join(' / ')
+            });
+        } else if (item.type === 'dir') {
+            // RECURSIVE CALL: Go deeper into this sub-folder
+            const subFiles = await fetchRecursiveFiles(item.path);
+            collectedFiles = collectedFiles.concat(subFiles);
+        }
+    }
+    return collectedFiles;
+}
+
+function renderFolder(title, files) {
+    const grid = document.getElementById('folder-grid');
+    const cleanTitle = title === 'bareacts' ? 'Bare Acts' : title;
+    
+    const fileHtml = files.length === 0 
+        ? `<p style="color:var(--text3); font-size:12px; padding:10px;">No files found.</p>`
+        : files.map(f => `
             <div class="file-item">
-                <span>${f.name}</span>
-                <a href="${f.download_url}" target="_blank" class="btn" style="font-size:10px; padding:4px 8px;">View</a>
+                <div class="file-info">
+                    <span style="font-weight:600;">${f.name}</span>
+                    ${f.displayPath ? `<span class="sub-path">${f.displayPath}</span>` : ''}
+                </div>
+                <a href="${f.download_url}" target="_blank" class="btn" style="font-size:10px; padding:5px 10px;">OPEN</a>
             </div>
         `).join('');
-    }
 
     grid.innerHTML += `
         <div class="folder-section">
-            <h3 class="folder-title">${name.replace('bareacts', 'Bare Acts')}</h3>
-            ${fileHtml}
+            <h3 class="folder-title" style="text-transform:capitalize;">${cleanTitle}</h3>
+            <div style="flex:1;">${fileHtml}</div>
         </div>
     `;
 }
 
 function openSettings() {
-    const r = prompt("Enter Repo Path (User/Repo):", _ghRepo);
-    const t = prompt("Enter GitHub Personal Access Token:", _ghToken);
+    const r = prompt("Repo (User/Repo):", _ghRepo);
+    const t = prompt("GitHub Token:", _ghToken);
     if(r && t) {
         localStorage.setItem('lex-gh-repo', r);
         localStorage.setItem('lex-gh-token', t);
-        _ghRepo = r; _ghToken = t;
-        syncGitHub();
+        location.reload();
     }
 }
 </script>
-
 </body>
 </html>
