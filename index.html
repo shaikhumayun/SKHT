@@ -1963,8 +1963,10 @@ function doLogin() {
   setupUserUI();
   init();
   setTimeout(_lexRefreshCurrentPage, 100);
-  // Pull latest files from GitHub for this user's session
-  setTimeout(async () => { if (typeof ghPullOnLogin === 'function') await ghPullOnLogin(); }, 800);
+  // Scan GitHub folders for this user's session
+  setTimeout(async () => {
+    if (typeof ghScanAllFolders === 'function') await ghScanAllFolders(false);
+  }, 600);
 }
 
 function doLogout() {
@@ -2215,11 +2217,12 @@ function showPage(id) {
 // Show document library category
 let currentDLCat = 'bareacts';
 const DL_CAT_INFO = {
-  bareacts:  { label:'Bare Acts',            sub:'Indian Statutes',         icon:'📋', grad:'linear-gradient(135deg,#0a1a4a,#1a4a8a)' },
-  judgments: { label:'Judgments',            sub:'Court Orders & Decisions',icon:'⚖',  grad:'linear-gradient(135deg,#4a0a0a,#8b1a1a)' },
-  books:     { label:'Books & Commentaries', sub:'Legal Texts & Treatises', icon:'📚', grad:'linear-gradient(135deg,#1a3a0a,#2a6a1a)' },
-  citations: { label:'Case Citations',       sub:'Digests & Headnotes',     icon:'📜', grad:'linear-gradient(135deg,#3a1a0a,#7a3a0a)' },
-  others:    { label:'Other Documents',      sub:'Circulars & Forms',       icon:'🗂',  grad:'linear-gradient(135deg,#1a1a3a,#3a3a6a)' }
+  bareacts:  { label:'Bare Acts',            sub:'Indian Statutes',         icon:'📋', grad:'linear-gradient(135deg,#0a1a4a,#1a4a8a)', ghFolder:'bareacts' },
+  judgments: { label:'Judgments',            sub:'Court Orders & Decisions',icon:'⚖',  grad:'linear-gradient(135deg,#4a0a0a,#8b1a1a)', ghFolder:'judgments' },
+  books:     { label:'Books & Commentaries', sub:'Legal Texts & Treatises', icon:'📚', grad:'linear-gradient(135deg,#1a3a0a,#2a6a1a)', ghFolder:'books' },
+  citations: { label:'Case Citations',       sub:'Digests & Headnotes',     icon:'📜', grad:'linear-gradient(135deg,#3a1a0a,#7a3a0a)', ghFolder:'citations' },
+  others:    { label:'Other Documents',      sub:'Circulars & Forms',       icon:'🗂',  grad:'linear-gradient(135deg,#1a1a3a,#3a3a6a)', ghFolder:'others' },
+  folders:   { label:'Folder Files',         sub:'Custom Folders',          icon:'📁', grad:'linear-gradient(135deg,#1a1a1a,#3a3a3a)', ghFolder:'folders' }
 };
 
 function showDL(cat) {
@@ -4841,362 +4844,348 @@ function deleteCitation(id) {
 
 
 // ══════════════════════════════════════════════════════
-// GITHUB LIVE DATABASE ENGINE v2
-// ══════════════════════════════════════════════════════
-//
-// HOW IT WORKS:
-//  SH sets up GitHub once (username + repo + token).
-//  That config is saved in localStorage on SH's device.
-//
-//  ALL OTHER USERS on ANY DEVICE:
-//  • Only need the username + repo (no token needed to READ)
-//  • App reads db.json from raw.githubusercontent.com (public, no auth)
-//  • Auto-loads on every login, every 10 seconds
-//  • Files appear instantly for everyone
-//
-//  UPLOAD (SH / KS / PK with token only):
-//  • Files go to GitHub repo + db.json updated
-//  • All viewers see the change within 10 seconds
-//
+// GITHUB FOLDER READER — Direct repo scanning
+// Reads files directly from GitHub folders.
+// No db.json needed. Whatever you upload to GitHub
+// manually appears in the app automatically.
 // ══════════════════════════════════════════════════════
 
-const GH_CFG_KEY   = 'lex-gh-v10-config';
-const GH_READ_KEY  = 'lex-gh-v10-read';
-const GH_DB_PATH   = 'lexdb/db.json';
-const GH_FILES_DIR = 'lexdb/files';
+// Map GitHub folder names → app categories
+const GH_FOLDER_MAP = {
+  'bareacts':   { dlcat:'bareacts',   label:'Bare Acts' },
+  'bare_acts':  { dlcat:'bareacts',   label:'Bare Acts' },
+  'judgments':  { dlcat:'judgments',  label:'Judgments' },
+  'judgment':   { dlcat:'judgments',  label:'Judgments' },
+  'books':      { dlcat:'books',      label:'Books' },
+  'book':       { dlcat:'books',      label:'Books' },
+  'citations':  { dlcat:'citations',  label:'Citations' },
+  'citation':   { dlcat:'citations',  label:'Citations' },
+  'others':     { dlcat:'others',     label:'Others' },
+  'other':      { dlcat:'others',     label:'Others' },
+  'forms':      { dlcat:'others',     label:'Others' },
+  'circulars':  { dlcat:'others',     label:'Others' },
+};
 
-// ── HARDCODED PUBLIC REPO (set once by SH, embedded in HTML)
-// All devices that open this HTML file auto-read from this repo — zero setup
-const HARDCODED_GH_USER = 'shaikhumayun';   // filled in by SH during setup
-const HARDCODED_GH_REPO = 'SH-LEGAL';   // filled in by SH during setup
+// Cache so we don't hammer GitHub API
+let _ghFolderCache = {};
+let _ghFolderCacheTime = 0;
+const CACHE_TTL = 30000; // 30 seconds
 
-let _ghUser      = '';
-let _ghRepo      = '';
-let _ghToken     = '';
-let _ghConnected = false;
-let _ghReadable  = false;
-let _ghPollTimer = null;
-let _ghLastMD5   = '';
+// ─── Read a single GitHub folder → return array of file objects
+async function ghReadFolder(folderName) {
+  const user = _ghUser || HARDCODED_GH_USER;
+  const repo = _ghRepo || HARDCODED_GH_REPO;
+  if (!user || user === '%%GH_USER%%') return [];
 
-// ─── Config helpers
-function ghLoadConfig() {
-  // 1. Try full config first (SH's device — has token)
   try {
-    const full = JSON.parse(localStorage.getItem(GH_CFG_KEY) || 'null');
-    if (full && full.user && full.repo && full.token) {
-      _ghUser = full.user; _ghRepo = full.repo; _ghToken = full.token;
-      _ghConnected = true; _ghReadable = true;
-      return full;
-    }
-  } catch(e) {}
+    // Use GitHub Contents API — works for public repos with no token
+    const apiUrl = `https://api.github.com/repos/${user}/${repo}/contents/${folderName}`;
+    const headers = { 'Accept': 'application/vnd.github.v3+json' };
+    if (_ghToken) headers['Authorization'] = 'token ' + _ghToken;
 
-  // 2. Try saved read-only config
-  try {
-    const ro = JSON.parse(localStorage.getItem(GH_READ_KEY) || 'null');
-    if (ro && ro.user && ro.repo) {
-      _ghUser = ro.user; _ghRepo = ro.repo; _ghToken = '';
-      _ghConnected = false; _ghReadable = true;
-      return ro;
-    }
-  } catch(e) {}
+    const r = await fetch(apiUrl, { headers });
+    if (r.status === 404) return [];  // folder doesn't exist yet
+    if (!r.ok) return [];
+    const items = await r.json();
+    if (!Array.isArray(items)) return [];
 
-  // 3. ── HARDCODED FALLBACK (works on every device with zero setup)
-  // Once SH enters their GitHub details, we embed them in the HTML itself.
-  // Every device that opens this HTML file auto-connects to read files.
-  if (HARDCODED_GH_USER && HARDCODED_GH_USER !== '%%GH_USER%%' &&
-      HARDCODED_GH_REPO && HARDCODED_GH_REPO !== '%%GH_REPO%%') {
-    _ghUser = HARDCODED_GH_USER;
-    _ghRepo = HARDCODED_GH_REPO;
-    _ghToken = '';
-    _ghConnected = false;
-    _ghReadable  = true;
-    return { user: _ghUser, repo: _ghRepo };
+    const catInfo = GH_FOLDER_MAP[folderName.toLowerCase()] || { dlcat: 'others', label: 'Others' };
+
+    // Convert GitHub file objects to our app's file format
+    return items
+      .filter(item => item.type === 'file' && !item.name.startsWith('.') && item.name !== 'placeholder.txt' && item.name !== 'README.md')
+      .map(item => {
+        const ext = item.name.split('.').pop().toLowerCase();
+        const rawUrl = item.download_url || `https://raw.githubusercontent.com/${user}/${repo}/main/${folderName}/${item.name}`;
+        const contentType = ext === 'pdf' ? 'pdf'
+          : ['png','jpg','jpeg','gif','webp'].includes(ext) ? 'image'
+          : ['txt','md','csv'].includes(ext) ? 'text'
+          : 'binary';
+
+        return {
+          id:          'gh_' + folderName + '_' + item.sha.substring(0,8),
+          name:        item.name,
+          title:       item.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' '),
+          dlcat:       catInfo.dlcat,
+          size:        item.size > 1048576 ? (item.size/1048576).toFixed(1)+'MB' : Math.round(item.size/1024)+'KB',
+          type:        ext,
+          uploadedBy:  'GitHub',
+          date:        'Manual upload',
+          contentType: contentType,
+          content:     rawUrl,      // use raw URL as content source
+          ghPushed:    true,
+          ghRawUrl:    rawUrl,
+          fromGHFolder: true,
+          ghFolder:    folderName,
+          sha:         item.sha
+        };
+      });
+  } catch(e) {
+    console.warn('ghReadFolder error for', folderName, e.message);
+    return [];
   }
-
-  return null;
 }
 
+// ─── Scan ALL known folders and build complete file list
+async function ghScanAllFolders(silent = false) {
+  const user = _ghUser || HARDCODED_GH_USER;
+  const repo = _ghRepo || HARDCODED_GH_REPO;
+  if (!user || user === '%%GH_USER%%') return;
+
+  // Check cache
+  if (Date.now() - _ghFolderCacheTime < CACHE_TTL && Object.keys(_ghFolderCache).length > 0) {
+    applyFolderCache();
+    return;
+  }
+
+  if (!silent) ghSetBar('busy', '🔄 Reading files from GitHub repo…');
+
+  // Read all folders in parallel
+  const folderNames = Object.keys(GH_FOLDER_MAP);
+  const uniqueFolders = [...new Set(folderNames)];  // deduplicate
+
+  try {
+    const results = await Promise.all(uniqueFolders.map(f => ghReadFolder(f)));
+
+    // Merge all results, deduplicate by sha
+    const allFiles = [];
+    const seenShas = new Set();
+    results.forEach(files => {
+      files.forEach(f => {
+        if (!seenShas.has(f.sha)) {
+          seenShas.add(f.sha);
+          allFiles.push(f);
+        }
+      });
+    });
+
+    // Cache it
+    _ghFolderCache = { files: allFiles };
+    _ghFolderCacheTime = Date.now();
+
+    // Merge with manually added records (from db.json if any)
+    // GitHub folder files take priority (they are source of truth)
+    const manualRecords = window._LEX_STORE_MANUAL || [];
+    const merged = [
+      ...allFiles,
+      ...manualRecords.filter(m => !allFiles.find(f => f.name === m.name && f.dlcat === m.dlcat))
+    ];
+
+    window._LEX_STORE = merged;
+    try { localStorage.setItem('lex-shared-uploads', JSON.stringify(merged)); } catch(e) {}
+    try { if (typeof _LEX_BC !== 'undefined' && _LEX_BC) _LEX_BC.postMessage({ type:'SET', uploads: merged }); } catch(e) {}
+
+    const total = allFiles.length;
+    ghSetBar('ok', `🐙 GitHub connected — ${total} file${total!==1?'s':''} loaded from ${user}/${repo}`);
+    ghSetLastPull(total);
+
+    updateStats();
+    updateDLCounts();
+    _lexRefreshCurrentPage();
+
+    // Also pull citations
+    if (typeof ghPullCitations === 'function') {
+      ghPullCitations().then(() => {
+        updateStats();
+        if (document.querySelector('#page-citations.active')) renderCitationsPage();
+      });
+    }
+
+  } catch(e) {
+    ghSetBar('err', '⚠ Error reading GitHub repo: ' + e.message.slice(0,60));
+  }
+}
+
+function applyFolderCache() {
+  if (!_ghFolderCache.files) return;
+  window._LEX_STORE = _ghFolderCache.files;
+  updateStats();
+  updateDLCounts();
+  _lexRefreshCurrentPage();
+}
+
+// ─── Override ghPull to use folder scanning
+async function ghPull(silent = false) {
+  // Always scan folders first (this is the main read method)
+  await ghScanAllFolders(silent);
+
+  // Also try db.json for any files uploaded through the app
+  try {
+    const dbRecords = await ghReadDB();
+    if (dbRecords && dbRecords.length > 0) {
+      const current = window._LEX_STORE || [];
+      // Add db.json records that aren't already in the folder scan
+      const extras = dbRecords.filter(d =>
+        !d.fromGHFolder && !current.find(c => c.id === d.id || c.sha === d.sha)
+      );
+      if (extras.length > 0) {
+        window._LEX_STORE = [...current, ...extras];
+        updateStats();
+        updateDLCounts();
+        _lexRefreshCurrentPage();
+      }
+    }
+  } catch(e) {}
+}
+
+// ─── Start auto-scan every 30 seconds
+function ghStartPoll() {
+  if (_ghPollTimer) clearInterval(_ghPollTimer);
+  _ghPollTimer = setInterval(() => ghScanAllFolders(true), 30000);
+}
+
+// ─── Override ghInit to use folder scanning
+async function ghInit() {
+  const cfg = ghLoadConfig();
+
+  // Always set user/repo from hardcoded values if not in localStorage
+  if (!_ghUser || !_ghRepo) {
+    if (HARDCODED_GH_USER && HARDCODED_GH_USER !== '%%GH_USER%%') {
+      _ghUser = HARDCODED_GH_USER;
+      _ghRepo = HARDCODED_GH_REPO;
+      _ghReadable = true;
+    }
+  }
+
+  if (!_ghUser || _ghUser === '%%GH_USER%%') {
+    ghSetBar('off', 'GitHub not configured');
+    return;
+  }
+
+  ghSetBar('busy', '⬇ Loading files from GitHub…');
+  await ghScanAllFolders(false);
+  ghStartPoll();
+}
+
+// ─── Override getSharedUploads to always return current store
+function getSharedUploads() {
+  return window._LEX_STORE || [];
+}
+
+// ─── Override openFileViewer for GitHub raw URLs
+const _origOpenFileViewer = typeof openFileViewer === 'function' ? openFileViewer : null;
+function openFileViewer(fileId) {
+  // Find file in store
+  const f = getSharedUploads().find(x => x.id === fileId);
+  if (!f) { showToast('File not found'); return; }
+
+  fvCurrentFile = f;
+  fvMatches = []; fvMatchIdx = 0; fvRawText = '';
+  fvFontSize = 15;
+
+  document.getElementById('fv-title').textContent      = f.title || f.name;
+  document.getElementById('fv-s-name').textContent     = f.name;
+  document.getElementById('fv-s-size').textContent     = f.size;
+  document.getElementById('fv-s-type').textContent     = (f.type||'').toUpperCase();
+  document.getElementById('fv-s-by').textContent       = f.uploadedBy || 'GitHub';
+  document.getElementById('fv-s-date').textContent     = f.date || '—';
+  document.getElementById('fv-bc-cat').textContent     = DL_CAT_INFO[f.dlcat]?.label || f.dlcat || 'Library';
+  document.getElementById('fv-bc-name').textContent    = f.title || f.name;
+  document.getElementById('fv-search-input').value     = '';
+  document.getElementById('fv-match-info').textContent = '';
+
+  const body = document.getElementById('fv-body');
+  body.innerHTML = '';
+
+  const rawUrl = f.ghRawUrl || f.content;
+
+  if (f.contentType === 'pdf' || (f.type || '').toLowerCase() === 'pdf') {
+    document.getElementById('fv-s-words-wrap').style.display = 'none';
+    document.getElementById('fv-search-wrap').style.opacity = '0.4';
+    document.getElementById('fv-search-wrap').style.pointerEvents = 'none';
+    const wrap = document.createElement('div');
+    wrap.className = 'fv-pdf-wrap';
+    wrap.innerHTML = `<iframe class="fv-pdf-embed" id="fv-pdf-iframe" src="${rawUrl}#toolbar=1" title="${escHtml(f.name)}"></iframe>`;
+    body.appendChild(wrap);
+
+  } else if (f.contentType === 'image') {
+    document.getElementById('fv-s-words-wrap').style.display = 'none';
+    document.getElementById('fv-search-wrap').style.opacity = '0.3';
+    document.getElementById('fv-search-wrap').style.pointerEvents = 'none';
+    const wrap = document.createElement('div');
+    wrap.className = 'fv-img-wrap';
+    wrap.innerHTML = `<img src="${rawUrl}" alt="${escHtml(f.name)}" style="max-width:100%;"/>`;
+    body.appendChild(wrap);
+
+  } else if (f.contentType === 'text' && f.content && !f.content.startsWith('http')) {
+    // Local text content
+    fvRawText = f.content;
+    const words = fvRawText.trim().split(/\s+/).length;
+    document.getElementById('fv-s-words').textContent = words.toLocaleString();
+    document.getElementById('fv-s-words-wrap').style.display = '';
+    document.getElementById('fv-search-wrap').style.opacity = '1';
+    document.getElementById('fv-search-wrap').style.pointerEvents = '';
+    const area = document.createElement('div');
+    area.className = 'fv-content-area';
+    area.id = 'fv-text-area';
+    area.style.setProperty('--fv-font-size', fvFontSize + 'px');
+    area.innerHTML = renderTextContent(f.content);
+    body.appendChild(area);
+
+  } else {
+    // For GitHub-hosted files (binary/docx/unknown) — show download option
+    document.getElementById('fv-s-words-wrap').style.display = 'none';
+    document.getElementById('fv-search-wrap').style.opacity = '0.3';
+    document.getElementById('fv-search-wrap').style.pointerEvents = 'none';
+    body.innerHTML = `<div class="fv-no-preview">
+      <div class="np-icon">${f.type==='docx'||f.type==='doc'?'📘':'📁'}</div>
+      <h3>${escHtml(f.title || f.name)}</h3>
+      <p>${f.type?.toUpperCase()||'File'} — ${f.size}<br>This file type opens in external applications.</p>
+      <div style="display:flex;gap:10px;margin-top:16px;justify-content:center;">
+        <a href="${rawUrl}" target="_blank" class="fv-action-btn fv-btn-dl" style="text-decoration:none;">⬇ Download File</a>
+        <a href="${rawUrl}" target="_blank" class="fv-action-btn fv-btn-print" style="text-decoration:none;">🌐 Open in Browser</a>
+      </div>
+    </div>`;
+  }
+
+  document.getElementById('file-viewer-overlay').classList.add('show');
+  setTimeout(() => document.getElementById('fv-search-input').focus(), 200);
+}
+
+// ─── Override fvDownload to handle GitHub URLs
+function fvDownload() {
+  if (!fvCurrentFile) return;
+  const url = fvCurrentFile.ghRawUrl || fvCurrentFile.content;
+  if (!url) { showToast('No file available'); return; }
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fvCurrentFile.name;
+  a.target = '_blank';
+  a.click();
+  showToast('⬇ Downloading: ' + fvCurrentFile.name);
+}
+
+// ─── Override downloadFileById for GitHub files
+function downloadFileById(fileId) {
+  const f = getSharedUploads().find(x => x.id === fileId);
+  if (!f) { showToast('File not found'); return; }
+  const url = f.ghRawUrl || f.content;
+  if (!url) { showToast('No download URL'); return; }
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = f.name;
+  a.target = '_blank';
+  a.click();
+  showToast('⬇ Downloading: ' + f.name);
+}
+
+// ─── Additional GitHub helpers (stubs/implementations)
 function ghSaveFullConfig(user, repo, token) {
   _ghUser = user; _ghRepo = repo; _ghToken = token;
   _ghConnected = true; _ghReadable = true;
   localStorage.setItem(GH_CFG_KEY,  JSON.stringify({ user, repo, token }));
   localStorage.setItem(GH_READ_KEY, JSON.stringify({ user, repo }));
-  // ── Embed credentials into a downloadable version of this HTML
-  // so other devices auto-connect just by opening the file
   ghEmbedAndOfferDownload(user, repo);
 }
-
-function ghEmbedAndOfferDownload(user, repo) {
-  // Get the current HTML source and replace the placeholder values
-  try {
-    const scripts = document.querySelectorAll('script');
-    let src = '';
-    // Get the full HTML
-    src = document.documentElement.outerHTML;
-    // Replace placeholders with real values
-    src = src.replace(/const HARDCODED_GH_USER = '[^']*'/g, "const HARDCODED_GH_USER = '" + user + "'");
-    src = src.replace(/const HARDCODED_GH_REPO = '[^']*'/g, "const HARDCODED_GH_REPO = '" + repo + "'");
-    // Also clear the token from the embedded version for security
-    // (token stays only in localStorage on SH's device)
-    // Store the embed-ready HTML in localStorage so SH can download it
-    try { localStorage.setItem('lex-embed-html', src); } catch(e) {}
-    // Show download button for the pre-configured HTML
-    showEmbedDownloadBanner(user, repo);
-  } catch(e) { console.warn('Embed failed:', e); }
-}
-
-function showEmbedDownloadBanner(user, repo) {
-  const existing = document.getElementById('embed-download-banner');
-  if (existing) existing.remove();
-  const banner = document.createElement('div');
-  banner.id = 'embed-download-banner';
-  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:linear-gradient(135deg,#1a6e3c,#0a4a2a);padding:12px 20px;display:flex;align-items:center;gap:14px;box-shadow:0 4px 20px rgba(0,0,0,0.5);';
-  banner.innerHTML = '<span style="font-size:20px;">📤</span>'
-    + '<div style="flex:1;">'
-    + '<div style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:#2ecc71;font-weight:700;letter-spacing:0.08em;">GITHUB CONNECTED — SHARE THIS FILE WITH ALL USERS</div>'
-    + '<div style="font-size:12px;color:rgba(255,255,255,0.8);margin-top:2px;">Download the updated HTML file and send it to all users. Zero setup needed on their device.</div>'
-    + '</div>'
-    + '<button onclick="ghDownloadEmbeddedFile()" style="padding:9px 18px;background:#2ecc71;border:none;border-radius:6px;color:#000;font-family:\'Outfit\',sans-serif;font-size:12px;font-weight:700;cursor:pointer;white-space:nowrap;">⬇ Download Updated File</button>'
-    + '<button onclick="this.parentElement.remove()" style="padding:9px 12px;background:transparent;border:1px solid rgba(255,255,255,0.3);border-radius:6px;color:white;cursor:pointer;font-size:13px;">✕</button>';
-  document.body.appendChild(banner);
-}
-
-function ghDownloadEmbeddedFile() {
-  try {
-    let src = document.documentElement.outerHTML;
-    src = src.replace(/const HARDCODED_GH_USER = '[^']*'/g, "const HARDCODED_GH_USER = '" + _ghUser + "'");
-    src = src.replace(/const HARDCODED_GH_REPO = '[^']*'/g, "const HARDCODED_GH_REPO = '" + _ghRepo + "'");
-    const blob = new Blob([src], { type: 'text/html' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'SKHT_COURT_configured.html';
-    a.click();
-    showToast('✅ Downloaded! Send this file to KS, PK, and all users. Zero setup needed on their devices.');
-  } catch(e) {
-    showToast('⚠ Download failed: ' + e.message);
-  }
-}
-
 function ghSaveReadOnlyConfig(user, repo) {
   _ghUser = user; _ghRepo = repo; _ghToken = '';
   _ghConnected = false; _ghReadable = true;
   localStorage.setItem(GH_READ_KEY, JSON.stringify({ user, repo }));
 }
-
-// ─── URL builders
-function ghRawUrl(path) {
-  return `https://raw.githubusercontent.com/${_ghUser}/${_ghRepo}/main/${path}?cb=${Date.now()}`;
-}
-function ghApiUrl(path) {
-  return `https://api.github.com/repos/${_ghUser}/${_ghRepo}/contents/${path}`;
-}
-function ghHeaders(write = false) {
-  const h = { 'Accept': 'application/vnd.github.v3+json' };
-  if (_ghToken) h['Authorization'] = 'token ' + _ghToken;
-  if (write)    h['Content-Type']  = 'application/json';
-  return h;
-}
-
-// ─── Sync bar
-function ghSetBar(state, msg) {
-  const bar  = document.getElementById('gh-sync-bar');
-  const text = document.getElementById('gh-bar-text');
-  const pull = document.getElementById('gh-bar-pull-btn');
-  if (!bar) return;
-  bar.className = 'gh-bar-' + state;
-  if (msg && text) text.textContent = msg;
-  if (pull) pull.style.display = _ghReadable ? 'inline-block' : 'none';
-}
-function ghSetLastPull(count) {
-  const el = document.getElementById('gh-bar-lastpull');
-  if (el) el.textContent = `· ${count} file${count!==1?'s':''} · synced ${new Date().toLocaleTimeString('en-IN',{hour:'2-digit',minute:'2-digit',second:'2-digit'})}`;
-}
-
-// ─── READ db.json from GitHub (NO TOKEN NEEDED for public repo)
-async function ghReadDB() {
-  if (!_ghUser || !_ghRepo) return null;
-  try {
-    const url = ghRawUrl(GH_DB_PATH);
-    const r   = await fetch(url, { cache: 'no-store' });
-    if (r.status === 404) return [];     // fresh repo, no db.json yet
-    if (!r.ok) return null;
-    const data = await r.json();
-    return Array.isArray(data) ? data : [];
-  } catch(e) { return null; }
-}
-
-// ─── WRITE db.json to GitHub (TOKEN REQUIRED)
-async function ghWriteDB(records) {
-  if (!_ghToken || !_ghUser || !_ghRepo) return false;
-  try {
-    const content = btoa(unescape(encodeURIComponent(JSON.stringify(records, null, 2))));
-    const apiUrl  = ghApiUrl(GH_DB_PATH);
-    let sha = null;
-    const check = await fetch(apiUrl, { headers: ghHeaders() });
-    if (check.ok) { const d = await check.json(); sha = d.sha; }
-    const body = {
-      message: `LexAdvocate db update ${new Date().toISOString()}`,
-      content,
-      ...(sha ? { sha } : {})
-    };
-    const r = await fetch(apiUrl, { method:'PUT', headers:ghHeaders(true), body:JSON.stringify(body) });
-    return r.ok;
-  } catch(e) { return false; }
-}
-
-// ─── Upload actual file to GitHub (TOKEN REQUIRED)
-async function ghUploadFile(fileId, filename, content, category) {
-  if (!_ghToken) return null;
-  try {
-    let raw = content;
-    if (typeof raw === 'string' && raw.includes('base64,')) raw = raw.split('base64,')[1];
-    else if (typeof raw === 'string' && !/^[A-Za-z0-9+/=\n]+$/.test(raw.substring(0,100))) {
-      raw = btoa(unescape(encodeURIComponent(raw)));
-    }
-    const filePath = `${GH_FILES_DIR}/${category}/${fileId}_${filename}`;
-    const apiUrl   = ghApiUrl(filePath);
-    let sha = null;
-    const check = await fetch(apiUrl, { headers: ghHeaders() });
-    if (check.ok) { const d = await check.json(); sha = d.sha; }
-    const body = {
-      message: `Upload ${filename} via LexAdvocate by ${currentUser?.displayName||'admin'}`,
-      content: raw,
-      ...(sha ? { sha } : {})
-    };
-    const r = await fetch(apiUrl, { method:'PUT', headers:ghHeaders(true), body:JSON.stringify(body) });
-    if (r.ok) {
-      // Return raw download URL (no auth needed to download from public repo)
-      return `https://raw.githubusercontent.com/${_ghUser}/${_ghRepo}/main/${filePath}`;
-    }
-    return null;
-  } catch(e) { return null; }
-}
-
-// ─── Delete file from GitHub
-async function ghDeleteFile(fileId, filename, category) {
-  if (!_ghToken) return;
-  try {
-    const filePath = `${GH_FILES_DIR}/${category}/${fileId}_${filename}`;
-    const apiUrl   = ghApiUrl(filePath);
-    const check    = await fetch(apiUrl, { headers: ghHeaders() });
-    if (!check.ok) return;
-    const d = await check.json();
-    await fetch(apiUrl, {
-      method: 'DELETE',
-      headers: ghHeaders(true),
-      body: JSON.stringify({ message: `Delete ${filename} via LexAdvocate`, sha: d.sha })
-    });
-  } catch(e) {}
-}
-
-// ─── PULL: Read db.json → update ALL users' view
-async function ghPull(silent = false) {
-  if (!_ghReadable) return;
-  if (!silent) ghSetBar('busy', '🔄 Loading files from GitHub…');
-
-  const records = await ghReadDB();
-  if (records === null) {
-    ghSetBar('err', '⚠ Cannot reach GitHub — check internet connection');
-    return;
-  }
-
-  // GitHub is ALWAYS source of truth
-  // Merge: keep local-only (not yet pushed) files too
-  const local     = window._LEX_STORE || [];
-  const localOnly = local.filter(l => !l.ghPushed && !records.find(r => r.id === l.id));
-  const merged    = [...records, ...localOnly];
-
-  window._LEX_STORE = merged;
-  try { localStorage.setItem('lex-shared-uploads', JSON.stringify(merged)); } catch(e) {}
-  try { if (typeof _LEX_BC !== 'undefined' && _LEX_BC) _LEX_BC.postMessage({ type:'SET', uploads: merged }); } catch(e) {}
-
-  const mode = _ghConnected ? '🐙 GitHub connected' : '👁 Reading from GitHub';
-  ghSetBar(_ghConnected ? 'ok' : 'ok', `${mode} — ${records.length} file${records.length!==1?'s':''} available to all users`);
-  ghSetLastPull(records.length);
-
-  _lexRefreshCurrentPage();
-  // Also pull citations
-  if (typeof ghPullCitations === 'function') {
-    ghPullCitations().then(() => {
-      updateStats();
-      if (document.querySelector('#page-citations.active')) renderCitationsPage();
-    });
-  }
-}
-
-// ─── Start polling — every 10 seconds (fast enough for live feel)
-function ghStartPoll() {
-  if (_ghPollTimer) clearInterval(_ghPollTimer);
-  // Poll every 10s for viewers, every 15s for admins (they write, so they know state)
-  const interval = _ghConnected ? 15000 : 10000;
-  _ghPollTimer = setInterval(() => ghPull(true), interval);
-}
-
-// ─── INIT — called on page load (before login)
-async function ghInit() {
-  const cfg = ghLoadConfig();
-  if (!cfg) {
-    ghSetBar('off', 'GitHub not configured — files local only');
-    return;
-  }
-
-  if (_ghConnected) {
-    // Has full config — verify connection then pull
-    try {
-      ghSetBar('busy', '🔌 Connecting to GitHub…');
-      const r = await fetch(`https://api.github.com/repos/${_ghUser}/${_ghRepo}`, { headers: ghHeaders() });
-      if (r.ok) {
-        ghSetBar('busy', '⬇ Loading files from GitHub…');
-        await ghPull(false);
-        ghStartPoll();
-      } else {
-        // Token may have expired — try read-only
-        _ghToken = ''; _ghConnected = false; _ghReadable = true;
-        await ghPull(false);
-        ghStartPoll();
-        ghSetBar('err', '⚠ Token invalid — read-only mode. Re-enter token in ⚙ Setup.');
-      }
-    } catch(e) {
-      ghSetBar('err', '⚠ Network error: ' + e.message.slice(0,50));
-    }
-  } else {
-    // Read-only config — just pull
-    ghSetBar('busy', '⬇ Loading files from GitHub…');
-    await ghPull(false);
-    ghStartPoll();
-  }
-}
-
-// ─── Also pull on every login (ensures latest files shown immediately)
-// This is called from doLogin after init()
-async function ghPullOnLogin() {
-  if (!_ghReadable) return;
-  await ghPull(true);
-}
-
-// ─── Setup modal functions
-function openGHSetup() {
-  const cfg = ghLoadConfig();
-  if (cfg) {
-    const u = document.getElementById('ghs-username');
-    const r = document.getElementById('ghs-repo');
-    const t = document.getElementById('ghs-token');
-    if (u) u.value = cfg.user  || '';
-    if (r) r.value = cfg.repo  || '';
-    if (t) t.value = cfg.token || '';
-  }
-  const statusEl = document.getElementById('gh-modal-status');
-  if (statusEl) {
-    if (_ghConnected)  statusEl.textContent = `✅ Connected to ${_ghUser}/${_ghRepo} (read+write)`;
-    else if (_ghReadable) statusEl.textContent = `👁 ${_ghUser}/${_ghRepo} (read-only — add token for upload)`;
-    else statusEl.textContent = 'Not configured';
-  }
-  document.getElementById('gh-setup-modal').style.display = 'flex';
-}
 function closeGHSetup() {
-  document.getElementById('gh-setup-modal').style.display = 'none';
+  const m = document.getElementById('gh-setup-modal');
+  if (m) m.style.display = 'none';
 }
-
 function ghShowTestResult(type, msg) {
   const el = document.getElementById('ghs-test-result');
   if (!el) return;
@@ -5206,235 +5195,23 @@ function ghShowTestResult(type, msg) {
   el.style.color      = type==='ok' ? '#2ecc71' : '#e74c3c';
   el.textContent      = msg;
 }
-
-// ─── Save & Connect (SH setup)
-async function ghSaveAndConnect() {
-  const user  = document.getElementById('ghs-username')?.value?.trim();
-  const repo  = document.getElementById('ghs-repo')?.value?.trim();
-  const token = document.getElementById('ghs-token')?.value?.trim();
-  if (!user || !repo) { ghShowTestResult('err', '⚠ Username and repo are required'); return; }
-  ghShowTestResult('ok', '⏳ Connecting…');
-
-  if (token) {
-    // Full config — test token
-    try {
-      const r = await fetch(`https://api.github.com/repos/${user}/${repo}`, {
-        headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github.v3+json' }
-      });
-      if (!r.ok) {
-        const e = await r.json();
-        ghShowTestResult('err', `❌ ${e.message}`);
-        return;
-      }
-      const d = await r.json();
-      ghSaveFullConfig(user, repo, token);
-      await ghPull(false);
-      ghStartPoll();
-      ghShowTestResult('ok', `✅ Connected to ${d.full_name}! Now click "Download Pre-Configured File" below and send it to all users.`);
-      showToast('✅ GitHub connected! Download file below and share with all users.');
-      const dlSection = document.getElementById('gh-download-section');
-      if (dlSection) dlSection.style.display = 'block';
-    } catch(e) {
-      ghShowTestResult('err', '❌ Network error: ' + e.message);
-    }
-  } else {
-    // Read-only config (no token) — just test reading
-    ghSaveReadOnlyConfig(user, repo);
-    const records = await ghReadDB();
-    if (records !== null) {
-      await ghPull(false);
-      ghStartPoll();
-      ghShowTestResult('ok', `✅ Read-only connected to ${user}/${repo} — ${records.length} files found. (No token = read only)`);
-    } else {
-      ghShowTestResult('err', '❌ Cannot read repo. Check username and repo name.');
-    }
-  }
-}
-
-async function ghTestOnly() {
-  const user  = document.getElementById('ghs-username')?.value?.trim();
-  const repo  = document.getElementById('ghs-repo')?.value?.trim();
-  const token = document.getElementById('ghs-token')?.value?.trim();
-  if (!user || !repo) { ghShowTestResult('err', '⚠ Username and repo required'); return; }
-  ghShowTestResult('ok', '⏳ Testing…');
-  try {
-    const r = await fetch(`https://api.github.com/repos/${user}/${repo}`,
-      token ? { headers: { 'Authorization': 'token ' + token, 'Accept': 'application/vnd.github.v3+json' } } : {});
-    if (r.ok) {
-      const d = await r.json();
-      ghShowTestResult('ok', `✅ Repo found: ${d.full_name} | ${d.private?'🔒 Private':'🌐 Public'}${token?' | 🔑 Write access enabled':' | 👁 Read-only (no token)'}`);
-    } else {
-      const e = await r.json();
-      ghShowTestResult('err', `❌ ${e.message}`);
-    }
-  } catch(e) { ghShowTestResult('err', '❌ ' + e.message); }
-}
-
-async function ghPullNow() {
-  await ghPull(false);
-  showToast('🔄 Synced from GitHub — ' + (window._LEX_STORE||[]).length + ' files loaded');
-}
-
 function ghDisconnect() {
   if (_ghPollTimer) clearInterval(_ghPollTimer);
   _ghConnected = false; _ghReadable = false; _ghUser=''; _ghRepo=''; _ghToken='';
   localStorage.removeItem(GH_CFG_KEY);
   localStorage.removeItem(GH_READ_KEY);
   ghSetBar('off', 'GitHub not configured');
-  document.getElementById('gh-bar-pull-btn').style.display = 'none';
+  const btn = document.getElementById('gh-bar-pull-btn');
+  if (btn) btn.style.display = 'none';
   closeGHSetup();
   showToast('GitHub disconnected.');
 }
-
-// ─── Push all local files to GitHub (migrate)
 async function ghPushAllLocal() {
-  if (!_ghConnected) { ghShowTestResult('err', '⚠ Need token to push files. Add your GitHub token above.'); return; }
+  if (!_ghToken) { ghShowTestResult('err', '⚠ Token required to push files.'); return; }
   const local = window._LEX_STORE || [];
   if (!local.length) { ghShowTestResult('ok', 'No local files to push.'); return; }
-  ghShowTestResult('ok', `⏳ Pushing ${local.length} file(s)…`);
-  const updated = [];
-  for (const rec of local) {
-    if (rec.content && !rec.ghPushed) {
-      const rawUrl = await ghUploadFile(rec.id, rec.name, rec.content, rec.dlcat || rec.folderId ? 'folders' : 'others');
-      if (rawUrl) {
-        updated.push({ ...rec, ghPushed:true, ghRawUrl:rawUrl, content: rec.contentType==='text' ? rec.content : rawUrl });
-        continue;
-      }
-    }
-    updated.push({ ...rec, ghPushed: !!rec.ghRawUrl });
-  }
-  const ok = await ghWriteDB(updated.map(r => ({ ...r, content: r.ghRawUrl || r.content })));
-  if (ok) {
-    window._LEX_STORE = updated;
-    setSharedUploads(updated);
-    ghShowTestResult('ok', `✅ Pushed ${updated.filter(r=>r.ghPushed).length} file(s) to GitHub. All users on all devices can now see them!`);
-    showToast('✅ All files pushed to GitHub!');
-  } else {
-    ghShowTestResult('err', '⚠ Failed to update db.json. Check token permissions.');
-  }
+  ghShowTestResult('ok', 'Push not needed — upload files directly to GitHub folders instead.');
 }
-
-// ─── Override handleFilesForCat to push to GitHub
-async function handleFilesForCat(files, cat) {
-  if (!currentUser?.canUpload) { showToast('⛔ Upload permission denied'); return; }
-  const description = document.getElementById('desc-' + cat)?.value?.trim() || '';
-  let uploads = getSharedUploads();
-  let added   = 0;
-
-  ghSetBar('busy', `⬆ Uploading ${files.length} file(s)…`);
-  showToast(`⏳ Uploading ${files.length} file(s)…`);
-
-  for (const f of Array.from(files)) {
-    const ext = f.name.split('.').pop().toLowerCase();
-    const isText = ['txt','md','csv'].includes(ext);
-    const contentType = isText ? 'text' : ['png','jpg','jpeg','gif','webp','svg'].includes(ext) ? 'image' : ext==='pdf' ? 'pdf' : 'binary';
-    const id  = 'f' + Date.now() + Math.random().toString(36).substr(2,6);
-
-    const content = await new Promise(resolve => {
-      const reader = new FileReader();
-      if (isText) { reader.onload = e => resolve(e.target.result); reader.readAsText(f); }
-      else        { reader.onload = e => resolve(e.target.result); reader.readAsDataURL(f); }
-    });
-
-    let ghRawUrl = null, storedContent = content;
-    if (_ghConnected) {
-      ghSetBar('busy', `⬆ Uploading "${f.name}" to GitHub…`);
-      ghRawUrl = await ghUploadFile(id, f.name, content, cat);
-      if (ghRawUrl && contentType !== 'text') storedContent = ghRawUrl;
-    }
-
-    const sizeStr = f.size > 1048576 ? (f.size/1048576).toFixed(1)+'MB' : (f.size/1024).toFixed(1)+'KB';
-    const record  = {
-      id, name: f.name, title: f.name.replace(/\.[^.]+$/,'').replace(/[-_]/g,' '),
-      dlcat: cat, description,
-      size: sizeStr, type: ext,
-      uploadedBy: currentUser.displayName,
-      date: new Date().toLocaleString('en-IN'),
-      contentType, content: storedContent,
-      ghPushed: !!ghRawUrl, ghRawUrl: ghRawUrl || null
-    };
-
-    uploads.push(record);
-    added++;
-  }
-
-  // Update db.json — this is what all other devices read
-  if (_ghConnected) {
-    ghSetBar('busy', '📝 Updating database on GitHub…');
-    const dbRecords = uploads.map(r => ({ ...r, content: r.ghRawUrl || r.content }));
-    const ok = await ghWriteDB(dbRecords);
-    if (ok) {
-      ghSetBar('ok', `🐙 GitHub updated — ${uploads.length} file(s) visible to ALL users on ALL devices`);
-      showToast(`✅ ${added} file(s) uploaded! Visible to all users on all devices within seconds.`);
-    } else {
-      ghSetBar('err', '⚠ Files uploaded but db.json update failed — retry with 🔄 Sync');
-      showToast(`⚠ ${added} file(s) saved but db.json failed. Click 🔄 Sync to retry.`);
-    }
-  } else {
-    ghSetBar('off', '⚠ GitHub not connected — files saved locally only');
-    showToast(`✅ ${added} file(s) saved locally. ⚠ Connect GitHub to share with other devices.`);
-  }
-
-  setSharedUploads(uploads);
-  updateStats(); updateDLCounts();
-  ['bareacts','judgments','books','citations','others'].forEach(k => renderUploadCatList(k));
-  renderDLRecent();
-  if (document.getElementById('desc-' + cat)) document.getElementById('desc-' + cat).value = '';
-}
-
-// ─── Override deleteUpload
-function deleteUpload(fileId) {
-  if (currentUser?.role !== 'superadmin') { showToast('⛔ Only SH can delete files'); return; }
-  if (!confirm('Delete this file from GitHub and local storage? All users will lose access.')) return;
-  const uploads  = getSharedUploads();
-  const file     = uploads.find(f => f.id === fileId);
-  const remaining = uploads.filter(f => f.id !== fileId);
-  setSharedUploads(remaining);
-
-  if (_ghConnected && file) {
-    ghSetBar('busy', '🗑 Deleting from GitHub…');
-    const cat = file.folderId ? 'folders' : (file.dlcat || 'others');
-    ghDeleteFile(file.id, file.name, cat).then(() => {
-      ghWriteDB(remaining.map(r => ({ ...r, content: r.ghRawUrl || r.content }))).then(ok => {
-        ghSetBar('ok', `🐙 GitHub updated — ${remaining.length} file(s)`);
-        showToast('🗑 Deleted from GitHub — change visible to all users');
-      });
-    });
-  } else {
-    showToast('🗑 Deleted from local storage');
-  }
-
-  updateStats(); updateDLCounts();
-  const pg = document.querySelector('.page.active');
-  if (pg) {
-    const id = pg.id.replace('page-','');
-    if (id==='upload')     ['bareacts','judgments','books','citations','others'].forEach(k=>renderUploadCatList(k));
-    if (id==='dlcat')      renderDLCat();
-    if (id==='doclibrary') renderDLRecent();
-    if (id==='folderView') renderFolderFiles(_selectedFolderId);
-    if (id==='admin')      renderAdminPage();
-  }
-}
-
-// ─── ghSyncFolders helper
-async function ghSyncFolders(folders) {
-  if (!_ghConnected) return;
-  try {
-    const content = btoa(unescape(encodeURIComponent(JSON.stringify(folders, null, 2))));
-    const apiUrl  = ghApiUrl('lexdb/folders.json');
-    let sha = null;
-    const check = await fetch(apiUrl, { headers: ghHeaders() });
-    if (check.ok) { const d = await check.json(); sha = d.sha; }
-    await fetch(apiUrl, { method:'PUT', headers:ghHeaders(true), body:JSON.stringify({ message:'Update folders', content, ...(sha?{sha}:{}) }) });
-  } catch(e) {}
-}
-
-// ─── Init on DOMContentLoaded
-document.addEventListener('DOMContentLoaded', function() {
-  ghInit();
-});
-
-// ghPullOnLogin is called from doLogin directly (no override needed)
 
 </script>
 </body>
