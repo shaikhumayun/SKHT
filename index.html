@@ -1963,10 +1963,10 @@ function doLogin() {
   setupUserUI();
   init();
   setTimeout(_lexRefreshCurrentPage, 100);
-  // Scan GitHub folders for this user's session
+  // Start GitHub sync after login
   setTimeout(async () => {
-    if (typeof ghScanAllFolders === 'function') await ghScanAllFolders(false);
-  }, 600);
+    await ghInit();
+  }, 300);
 }
 
 function doLogout() {
@@ -2716,58 +2716,12 @@ function dzOver(e, cat) { e.preventDefault(); document.getElementById('dz-'+cat)
 function dzLeave(e, cat) { document.getElementById('dz-'+cat)?.classList.remove('drag-over'); }
 function dzDrop(e, cat) { e.preventDefault(); dzLeave(e, cat); handleFilesForCat(e.dataTransfer.files, cat); }
 
-async function handleFilesForCat(files, cat) {
-  if (!currentUser?.canUpload) { showToast('⛔ Upload permission denied'); return; }
-  const uploads = getSharedUploads();
-  const ghEnabled = !!(localStorage.getItem('lex-gh-token'));
-  const description = document.getElementById('desc-' + cat)?.value?.trim() || '';
-  let added = 0;
 
-  showToast('⏳ Uploading ' + files.length + ' file(s)…');
-
-  const readers = Array.from(files).map(f => new Promise(resolve => {
-    const ext = f.name.split('.').pop().toLowerCase();
-    const isText = ['txt','md','csv'].includes(ext);
-    const isImg  = ['png','jpg','jpeg','gif','webp','svg'].includes(ext);
-    const isPDF  = ext === 'pdf';
-    const reader = new FileReader();
-    const id = 'f' + Date.now() + Math.random().toString(36).substr(2, 6);
-
-    const onLoad = async (contentType, content) => {
-      let ghUrl = null;
-      if (ghEnabled && content) ghUrl = await uploadToGitHub(f.name, content, f.type);
-      const record = {
-        id, name: f.name, dlcat: cat, description,
-        size: f.size > 1048576 ? (f.size/1048576).toFixed(1)+'MB' : (f.size/1024).toFixed(1)+'KB',
-        type: ext, uploadedBy: currentUser.displayName,
-        date: new Date().toLocaleString('en-IN'),
-        contentType, content, ghUrl: ghUrl || null
-      };
-      uploads.push(record);
-      // Also upload to Firebase cloud (async, non-blocking)
-      // GitHub sync handled above in handleFilesForCat
-      added++; resolve();
-    };
-
-    if (isText)         { reader.onload = e => onLoad('text',   e.target.result); reader.readAsText(f); }
-    else if (isImg||isPDF) { reader.onload = e => onLoad(isImg?'image':'pdf', e.target.result); reader.readAsDataURL(f); }
-    else                { reader.onload = e => onLoad('binary', e.target.result); reader.readAsDataURL(f); }
-  }));
-
-  await Promise.all(readers);
-  setSharedUploads(uploads);
-  updateStats();
-  updateDLCounts();
-  renderUploadCatList(cat);
-  renderDLRecent();
-  if (document.getElementById('desc-' + cat)) document.getElementById('desc-' + cat).value = '';
-  showToast(`✅ ${added} file(s) added to ${DL_CAT_INFO[cat]?.label || cat}${ghEnabled?' + GitHub':''}`);
-}
 
 // Legacy handlers for drag-over on old drop-zone IDs
-function dragOver(e) { e.preventDefault(); document.getElementById('drop-zone')?.classList.add('drag-over'); }
-function dragLeave(e) { document.getElementById('drop-zone')?.classList.remove('drag-over'); }
-function dropFiles(e) { e.preventDefault(); dragLeave(e); handleFilesForCat(e.dataTransfer.files, uploadActiveTab); }
+
+
+
 
 function renderSharedUploads() {
   const el = document.getElementById('shared-upload-list');
@@ -2975,31 +2929,7 @@ async function handleFiles(files) {
   showToast(`✅ ${added} file(s) uploaded${ghEnabled?' + pushed to GitHub':''}`);
 }
 
-async function deleteUpload(fileId) {
-  if (currentUser?.role !== 'superadmin') {
-    showToast('⛔ Only SH (Super Admin) can delete files');
-    return;
-  }
-  if (!confirm('Delete this file from cloud and local storage?')) return;
-  const uploads = getSharedUploads();
-  const file = uploads.find(f => f.id === fileId);
-  // Delete from GitHub if linked
-  if (file?.ghUrl && file?.name) deleteFromGitHub(file.name);
-  // Delete from Firebase cloud
-  // GitHub delete handled in deleteUpload override
-  setSharedUploads(uploads.filter(f => f.id !== fileId));
-  // Refresh UI
-  updateStats(); updateDLCounts();
-  const activePage = document.querySelector('.page.active');
-  if (activePage) {
-    const id = activePage.id.replace('page-','');
-    if (id==='upload') ['bareacts','judgments','books','citations','others'].forEach(k=>renderUploadCatList(k));
-    if (id==='dlcat')  renderDLCat();
-    if (id==='doclibrary') renderDLRecent();
-    if (id==='admin')  renderAdminPage();
-  }
-  showToast('🗑 File deleted' + (db?' from cloud +':' from') + ' local storage');
-}
+
 
 // ══════════════════════════════════════
 // ADMIN PANEL (SH only)
@@ -3398,96 +3328,7 @@ let fvRawText = '';
 
 let fvFontSize = 15;
 
-function openFileViewer(fileId) {
-  const f = getSharedUploads().find(x => x.id === fileId);
-  if (!f) { showToast('File not found'); return; }
-  fvCurrentFile = f;
-  fvMatches = []; fvMatchIdx = 0; fvRawText = '';
-  fvFontSize = 15;
-
-  document.getElementById('fv-title').textContent = f.name;
-  document.getElementById('fv-s-name').textContent = f.name;
-  document.getElementById('fv-s-size').textContent = f.size;
-  document.getElementById('fv-s-type').textContent = f.type.toUpperCase();
-  document.getElementById('fv-s-by').textContent = f.uploadedBy;
-  document.getElementById('fv-s-date').textContent = f.date;
-  document.getElementById('fv-bc-cat').textContent = DL_CAT_INFO[f.dlcat]?.label || f.dlcat || 'Library';
-  document.getElementById('fv-bc-name').textContent = f.name;
-  document.getElementById('fv-search-input').value = '';
-  document.getElementById('fv-match-info').textContent = '';
-
-  const body = document.getElementById('fv-body');
-  body.innerHTML = '';
-
-  const noSrch = (opacity) => {
-    document.getElementById('fv-s-words-wrap').style.display = 'none';
-    document.getElementById('fv-search-wrap').style.opacity = opacity;
-    document.getElementById('fv-search-wrap').style.pointerEvents = opacity === '1' ? '' : 'none';
-  };
-
-  if (!f.content) {
-    body.innerHTML = `<div class="fv-no-preview">
-      <div class="np-icon">📁</div>
-      <h3>${escHtml(f.name)}</h3>
-      <p>Preview not available for ${f.type.toUpperCase()} files in browser.<br>Click Download to save the file to your device.</p>
-      <div style="display:flex;gap:10px;margin-top:14px;">
-        <button class="fv-action-btn fv-btn-dl" onclick="fvDownload()">⬇ Download</button>
-      </div>
-    </div>`;
-    noSrch('0.3');
-  } else if (f.contentType === 'text') {
-    fvRawText = f.content;
-    const words = fvRawText.trim().split(/\s+/).length;
-    document.getElementById('fv-s-words').textContent = words.toLocaleString();
-    document.getElementById('fv-s-words-wrap').style.display = '';
-    document.getElementById('fv-search-wrap').style.opacity = '1';
-    document.getElementById('fv-search-wrap').style.pointerEvents = '';
-
-    const area = document.createElement('div');
-    area.className = 'fv-content-area';
-    area.id = 'fv-text-area';
-    area.style.setProperty('--fv-font-size', fvFontSize + 'px');
-    area.innerHTML = renderTextContent(f.content);
-    body.appendChild(area);
-
-  } else if (f.contentType === 'pdf') {
-    noSrch('0.4');
-    // PDF with embedded viewer + print button works natively
-    const wrap = document.createElement('div');
-    wrap.className = 'fv-pdf-wrap';
-    // Use object tag for better print support
-    wrap.innerHTML = `<iframe class="fv-pdf-embed" id="fv-pdf-iframe" src="${f.content}#toolbar=1&navpanes=1&scrollbar=1" title="${escHtml(f.name)}"></iframe>`;
-    body.appendChild(wrap);
-    document.getElementById('fv-s-words-wrap').style.display = 'none';
-    showToast('📕 PDF loaded — use Ctrl+F inside PDF to search, or 🖨 Print button above');
-
-  } else if (f.contentType === 'image') {
-    noSrch('0.3');
-    const wrap = document.createElement('div');
-    wrap.className = 'fv-img-wrap';
-    wrap.innerHTML = `<img src="${f.content}" alt="${escHtml(f.name)}" style="max-width:100%;"/>`;
-    body.appendChild(wrap);
-
-  } else {
-    // DOCX / binary
-    noSrch('0.3');
-    body.innerHTML = `<div class="fv-no-preview">
-      <div class="np-icon">📘</div>
-      <h3>${escHtml(f.name)}</h3>
-      <p>DOCX / binary files cannot be previewed in the browser.<br>Download the file to open it in Microsoft Word or similar.</p>
-      <div style="display:flex;gap:10px;margin-top:14px;">
-        <button class="fv-action-btn fv-btn-dl" onclick="fvDownload()">⬇ Download to Open in Word</button>
-        <button class="fv-action-btn fv-btn-print" onclick="fvDownload()">💾 Save File</button>
-      </div>
-    </div>`;
-  }
-
-  document.getElementById('file-viewer-overlay').classList.add('show');
-  setTimeout(() => document.getElementById('fv-search-input').focus(), 200);
-}
-
 function renderTextContent(text) {
-  const lines = text.split('\n');
   let html = '';
   lines.forEach(line => {
     const t = line.trim();
@@ -3505,10 +3346,6 @@ function closeFileViewer() {
   fvCurrentFile = null; fvMatches = []; fvMatchIdx = 0;
 }
 
-function fvDownload() {
-  if (!fvCurrentFile) return;
-  downloadFileById(fvCurrentFile.id);
-}
 
 // ── Zoom (text files only)
 function fvZoom(dir) {
@@ -3521,21 +3358,25 @@ function fvZoom(dir) {
 function fvPrint() {
   if (!fvCurrentFile) return;
   const f = fvCurrentFile;
+  const rawUrl = f.ghRawUrl || f.content || '';
 
-  if (f.contentType === 'pdf') {
-    // Print the PDF via iframe
-    const iframe = document.getElementById('fv-pdf-iframe');
-    if (iframe) { try { iframe.contentWindow.print(); } catch(e) { window.print(); } }
-    else { window.print(); }
+  if (f.contentType === 'pdf' || (f.type||'').toLowerCase() === 'pdf') {
+    // For GitHub PDFs: open in new tab — browser's native print works there
+    // Cross-origin iframes block contentWindow.print()
+    const w = window.open(rawUrl, '_blank');
+    if (w) {
+      w.onload = () => { try { w.print(); } catch(e) {} };
+    }
     return;
   }
 
   if (f.contentType === 'image') {
+    const imgUrl = f.ghRawUrl || f.content || '';
     const w = window.open('', '_blank');
-    w.document.write(`<html><head><title>${escHtml(f.name)}</title>
-      <style>body{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;}
-      img{max-width:100%;page-break-inside:avoid;}</style></head>
-      <body><img src="${f.content}" onload="window.print();window.close();"/></body></html>`);
+    w.document.write('<html><head><title>' + escHtml(f.name) + '</title>' +
+      '<style>body{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;}' +
+      'img{max-width:100%;}</style></head>' +
+      '<body><img src="' + imgUrl + '" onload="window.print();"/></body></html>');
     w.document.close();
     return;
   }
@@ -3574,23 +3415,7 @@ function fvPrint() {
   showToast('⚠ This file type cannot be printed directly. Download it first.');
 }
 
-function printFileById(fileId) {
-  const f = getSharedUploads().find(x => x.id === fileId);
-  if (!f) { showToast('File not found'); return; }
-  fvCurrentFile = f;
-  fvPrint();
-}
 
-function downloadFileById(fileId) {
-  const f = getSharedUploads().find(x => x.id === fileId);
-  if (!f) { showToast('File not found'); return; }
-  if (!f.content) { showToast('File content not available for download'); return; }
-  const a = document.createElement('a');
-  a.href = f.content;
-  a.download = f.name;
-  a.click();
-  showToast(`⬇ Downloading: ${f.name}`);
-}
 
 // ── In-file search ──
 function fvSearchNext() {
@@ -5346,9 +5171,21 @@ function openFileViewer(fileId) {
   if (f.contentType === 'pdf' || ext === 'pdf') {
     if (ww) ww.style.display = 'none';
     if (sw) { sw.style.opacity='0.4'; sw.style.pointerEvents='none'; }
+    // Use object tag + iframe fallback + direct link for GitHub PDFs
     const wrap = document.createElement('div');
     wrap.className = 'fv-pdf-wrap';
-    wrap.innerHTML = '<iframe class="fv-pdf-embed" id="fv-pdf-iframe" src="' + rawUrl + '#toolbar=1" title="' + escHtml(f.name) + '"></iframe>';
+    wrap.style.position = 'relative';
+    wrap.innerHTML =
+      '<iframe class="fv-pdf-embed" id="fv-pdf-iframe" src="' + rawUrl + '" title="' + escHtml(f.name) + '"' +
+      ' onerror="this.style.display=\'none\';document.getElementById(\'fv-pdf-fallback\').style.display=\'flex\'"></iframe>' +
+      '<div id="fv-pdf-fallback" class="fv-no-preview" style="display:none;">' +
+      '<div class="np-icon">📕</div>' +
+      '<h3>' + escHtml(f.title||f.name) + '</h3>' +
+      '<p>PDF preview blocked by browser security.<br>Use the buttons below to view.</p>' +
+      '<div style="display:flex;gap:10px;margin-top:14px;justify-content:center;">' +
+      '<a href="' + rawUrl + '" target="_blank" class="fv-action-btn fv-btn-dl" style="text-decoration:none;">🌐 Open in New Tab</a>' +
+      '<a href="' + rawUrl + '" download class="fv-action-btn fv-btn-print" style="text-decoration:none;">⬇ Download PDF</a>' +
+      '</div></div>';
     body.appendChild(wrap);
 
   } else if (f.contentType === 'image') {
@@ -5536,9 +5373,16 @@ function deleteUpload(fileId) {
   showToast('🗑 Deleted');
 }
 
-// ─── DOMContentLoaded — start GitHub sync
+// ─── DOMContentLoaded — seed from localStorage immediately (no flash)
+// ghInit() is called after login in doLogin() for authenticated access
 document.addEventListener('DOMContentLoaded', function() {
-  ghInit();
+  // Pre-seed the store from localStorage so pages don't flash empty
+  if (!window._LEX_STORE || window._LEX_STORE.length === 0) {
+    try {
+      const saved = localStorage.getItem('lex-shared-uploads');
+      if (saved) window._LEX_STORE = JSON.parse(saved);
+    } catch(e) {}
+  }
 });
 
 </script>
