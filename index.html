@@ -5,46 +5,129 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>SKHT COURT — Legal Research Portal</title>
 <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;0,700;0,900;1,400;1,700&family=JetBrains+Mono:wght@300;400;500;600&family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
+
 <style>
-/* ... (Keep your existing CSS from the original file) ... */
+/* CSS VARIABLES & CORE STYLES */
+:root {
+  --bg:#0a0b0d; --surface:#111318; --surface2:#181c22; --surface3:#1e2330;
+  --border:#2a2f3d; --border2:#353c50;
+  --gold:#c9a84c; --gold2:#e8c96a; --gold-dim:rgba(201,168,76,0.15);
+  --text:#e8e4da; --text2:#9a9585; --text3:#5a5650;
+  --danger:#e74c3c; --radius:8px;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+body{background:var(--bg);color:var(--text);font-family:'Outfit',sans-serif;min-height:100vh;}
+
+/* PREVENT BLANK PAGE: Ensure visible defaults */
+#app-interface { display: none; padding: 20px; }
+#login-screen { 
+  position:fixed; inset:0; z-index:9999; background:var(--bg); 
+  display:flex; align-items:center; justify-content:center;
+}
+.login-card {
+  background:var(--surface); border:1px solid var(--border2);
+  border-radius:20px; padding:40px; width:min(400px, 90vw); text-align:center;
+}
+.login-input {
+  width:100%; padding:12px; margin-bottom:15px; background:var(--surface2);
+  border:1px solid var(--border2); color:white; border-radius:var(--radius);
+}
+.login-btn {
+  width:100%; padding:12px; background:var(--gold); border:none;
+  border-radius:var(--radius); font-weight:700; cursor:pointer;
+}
+.file-card {
+  background:var(--surface2); border:1px solid var(--border);
+  padding:15px; border-radius:var(--radius); margin-bottom:10px;
+  display: flex; justify-content: space-between; align-items: center;
+}
+.cat-tag {
+  background: var(--gold-dim); color: var(--gold);
+  font-size: 10px; padding: 2px 6px; border-radius: 4px; font-family: 'JetBrains Mono';
+}
 </style>
+</head>
+
+<body>
+
+<div id="login-screen">
+  <div class="login-card">
+    <h1 style="color:var(--gold2); font-family:'Playfair Display'; margin-bottom:10px;">SKHT COURT</h1>
+    <p style="color:var(--text3); font-size:12px; margin-bottom:25px;">LEGAL RESEARCH PORTAL</p>
+    <input type="password" id="login-pass" class="login-input" placeholder="Enter Access Key">
+    <button class="login-btn" onclick="handleLogin()">ENTER PORTAL</button>
+    <p id="login-err" style="color:var(--danger); font-size:12px; margin-top:15px;"></p>
+  </div>
+</div>
+
+<div id="app-interface">
+  <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
+    <div>
+      <h2 style="font-family:'Playfair Display';">Repository Library</h2>
+      <p id="status-text" style="color:var(--text3); font-size:12px;">Connecting to GitHub...</p>
+    </div>
+    <button onclick="ghScanAllFolders(true)" style="padding:8px 16px; background:var(--surface3); color:white; border:1px solid var(--border); border-radius:5px; cursor:pointer;">
+      🔄 Sync Repo
+    </button>
+  </header>
+
+  <div id="file-display-area">
+    </div>
+</div>
 
 <script>
-/* ─── IMPROVED GITHUB REPO INTEGRATION ─── */
+/* ─── GITHUB REPO CONFIGURATION ─── */
+// Update these variables or ensure they are set in your browser's LocalStorage
+let _ghRepo = localStorage.getItem('lex-gh-repo') || ''; 
+let _ghToken = localStorage.getItem('lex-gh-token') || '';
+let _ghConnected = !!(_ghRepo && _ghToken);
 
 const LEGAL_FOLDERS = ['bareacts', 'judgments', 'books', 'citations', 'others'];
 
-async function ghScanAllFolders(force = false) {
-  if (!_ghConnected || !_ghToken) {
-    console.warn("GitHub not connected. Please set Repo and Token in Settings.");
-    return;
+/* ─── AUTHENTICATION ─── */
+function handleLogin() {
+  const pass = document.getElementById('login-pass').value;
+  // Change "1234" to your preferred access key
+  if (pass === "1234") {
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app-interface').style.display = 'block';
+    if (_ghConnected) {
+      ghScanAllFolders();
+    } else {
+      document.getElementById('status-text').innerText = "Notice: GitHub not configured in LocalStorage.";
+    }
+  } else {
+    document.getElementById('login-err').innerText = "Invalid Access Key. Please try again.";
   }
+}
+
+/* ─── REPOSITORY ACCESS FEATURE ─── */
+async function ghScanAllFolders(force = false) {
+  if (!_ghConnected) return;
   
-  showToast("🔄 Syncing with GitHub Repository...");
+  const status = document.getElementById('status-text');
+  status.innerText = "Syncing with repository folders...";
 
   try {
     let allFetchedFiles = [];
 
-    // Loop through each specific folder in your repo
+    // Map through the folders you specifically created in your repo
     const scanPromises = LEGAL_FOLDERS.map(async (folder) => {
       const url = `https://api.github.com/repos/${_ghRepo}/contents/${folder}`;
       const res = await fetch(url, {
         headers: { 
-          'Authorization': `token ${_ghToken}`, 
-          'Accept': 'application/vnd.github.v3+json' 
+          'Authorization': `token ${_ghToken}`,
+          'Accept': 'application/vnd.github.v3+json'
         }
       });
 
       if (res.ok) {
         const items = await res.json();
         return items.filter(item => item.type === 'file').map(file => ({
-          id: file.sha,
           name: file.name,
-          dlcat: folder, 
-          size: (file.size / 1024).toFixed(1) + ' KB',
-          date: new Date().toISOString().split('T')[0],
-          content: file.download_url, // Link to raw file in repo
-          fromGHFolder: true
+          category: folder,
+          url: file.download_url, // Direct raw link from GitHub
+          size: (file.size / 1024).toFixed(1) + ' KB'
         }));
       }
       return [];
@@ -52,68 +135,35 @@ async function ghScanAllFolders(force = false) {
 
     const results = await Promise.all(scanPromises);
     allFetchedFiles = results.flat();
-
-    // Get current local files but remove old GitHub-synced entries to avoid dupes
-    const localUploads = getSharedUploads().filter(f => !f.fromGHFolder);
-    const finalSync = [...localUploads, ...allFetchedFiles];
-
-    // Save to global store and localStorage
-    window._LEX_STORE = finalSync;
-    localStorage.setItem('lex-shared-uploads', JSON.stringify(finalSync));
     
-    // Refresh UI
-    updateStats();
-    refreshAllUILists();
-    showToast("✅ Repo Sync Complete");
-    
+    renderFiles(allFetchedFiles);
+    status.innerText = `Successfully synced ${allFetchedFiles.length} files from repository.`;
+
   } catch (err) {
-    console.error("GitHub Sync Error:", err);
-    showToast("❌ Sync failed. Check console for details.");
+    console.error("Sync Error:", err);
+    status.innerText = "Error: Could not reach GitHub. Check Token/Repo settings.";
   }
 }
 
-function refreshAllUILists() {
-  LEGAL_FOLDERS.forEach(cat => {
-    if (typeof renderUploadCatList === 'function') renderUploadCatList(cat);
-  });
-  if (typeof renderDLRecent === 'function') renderDLRecent();
-  if (typeof renderDLCat === 'function') renderDLCat();
-}
-
-/* ─── UPDATED DELETE LOGIC FOR REPO ─── */
-async function ghDeleteFile(fileId, fileName, folder) {
-  if (!_ghConnected || !_ghToken) return;
+function renderFiles(files) {
+  const area = document.getElementById('file-display-area');
+  if (files.length === 0) {
+    area.innerHTML = `<div style="text-align:center; padding:50px; color:var(--text3);">No files found in repo folders. Check /bareacts, /judgments, etc.</div>`;
+    return;
+  }
   
-  try {
-    // 1. Find file SHA if not provided
-    const url = `https://api.github.com/repos/${_ghRepo}/contents/${folder}/${fileName}`;
-    const res = await fetch(url, {
-      headers: { 'Authorization': `token ${_ghToken}` }
-    });
-    
-    if (res.ok) {
-      const data = await res.json();
-      const deleteRes = await fetch(url, {
-        method: 'DELETE',
-        headers: {
-          'Authorization': `token ${_ghToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          message: `Delete ${fileName} via Portal`,
-          sha: data.sha
-        })
-      });
-      if (deleteRes.ok) showToast(`🗑️ Deleted from GitHub: ${fileName}`);
-    }
-  } catch (err) {
-    console.error("Delete error:", err);
-  }
+  area.innerHTML = files.map(f => `
+    <div class="file-card">
+      <div>
+        <span class="cat-tag">${f.category.toUpperCase()}</span>
+        <div style="margin-top:5px; font-weight:500;">${f.name}</div>
+        <div style="font-size:11px; color:var(--text3);">${f.size}</div>
+      </div>
+      <a href="${f.url}" target="_blank" style="color:var(--gold); text-decoration:none; font-size:14px; font-weight:600;">View Document</a>
+    </div>
+  `).join('');
 }
-
-/* ─── (Keep all your other original functions like login, renderPage, etc.) ─── */
 </script>
-</head>
-<body>
+
 </body>
 </html>
